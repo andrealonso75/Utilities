@@ -1,0 +1,135 @@
+import hashlib
+from datetime import datetime
+from datetime import date
+import functools
+import operator
+import pandas as pd
+import re
+
+from pyspark.sql.functions import xxhash64
+
+from pyspark.sql.dataframe import DataFrame
+from pyspark.sql.functions import array
+from pyspark.sql.functions import col
+from pyspark.sql.functions import current_timestamp
+from pyspark.sql.functions import row_number
+from pyspark.sql.functions import trim
+from pyspark.sql.functions import udf
+from pyspark.sql.functions import when
+from pyspark.sql.functions import max as fmax
+from pyspark.sql.functions import min as fmin
+from pyspark.sql.types import StringType, DateType, LongType, IntegerType
+from pyspark.sql.window import Window
+
+def fill_blank_column(col_name, value_to_fill):
+    """Returns a spark expression that returns a col object, which
+    replaces "" and " " strings with the value_to_fill parameter
+    :col_name: column name to be filled
+    :value_to_fill: value to be filled in the column
+    
+    Use case:
+    df_filled = df.withColumn(col_name, fill_blank_column(col_name,value_to_fill))"""
+    
+    case_exp = (when(((trim(col_name) != "") & (col(col_name).isNotNull())),
+                     col(col_name))
+                .otherwise(value_to_fill)
+               )
+    
+    return case_exp
+
+
+def clean_symbols_column(column_name):
+    """ The (clean_symbols_column) function is used to remove symbols,
+    spaces and convert the string from Dataframe column to lower case.
+    :param column_name: Dataframe Column
+    :return: Dataframe Column
+    """
+    regex_expressions = {
+      r'a': r'[àãâäáÃÁÃÂ$]',
+      r'e': r'[éèêëÉÈÊ]',
+      r'i': r'[íìîïÍÌÎ]',
+      r'o': r'[óòõôöÓÒÕÔ]',
+      r'u': r'[úùûüÚÙÛ]',
+      r'c': r'[çÇ]'
+      # ,
+      # r'':r'[^\w]'
+    }
+    for key, value in regex_expressions.items():
+        column_name = re.sub(value, key, column_name).lower()
+    return column_name
+udf_clean_symbols = udf(clean_symbols_column, StringType())
+
+def get_year_month(df, ref_date):
+  """
+  Function to get year_month from a date column
+  :df:DataFrame to generate the year_month column
+  :ref_date: Column to convert to year_month
+  """
+  df = df.withColumn("year_month",coalesce(trunc(ref_date,"month"), to_date(lit("9999-12-31"))))
+  return df
+
+def encrypt_column(*columns) -> str:
+    
+    """ The function is used to convert a column string in a hash string 256.
+    :param columns: Dataframe Columns or a sequence of the string
+    :return: str with check_sum (256 hash)
+    Example::
+    df_result = df_source.withColumn("id_datahub", hash_udf(col("id"), col("name"), col("cidade"))) 
+    or 
+    hashed = encrypt_column("Quero-Quero", "Rio de Janeiro", "Brasil") """
+    
+    list_colums = []
+    for col_value in columns:
+        if col_value == None or col_value == "":
+            list_colums.append("*")
+        else:
+            list_colums.append(str(col_value))
+            
+    string_colums = ''.join(list_colums)
+    string_colums_hashed = hashlib.sha256(string_colums.encode()).hexdigest()
+    
+    return string_colums_hashed
+            
+hash_udf = udf(encrypt_column, StringType())
+
+# Função para extrair valores
+def extrair_valores(registro, chave):
+    """
+    Esta função é responsável por receber um registro (um dicionário no formato OrderedDict) e 
+    uma chave, e retornar o valor associado a essa chave no dicionário. 
+    Ela utiliza o método get para obter o valor da 
+    chave de forma segura, retornando None se a chave não existir no dicionário.
+    """
+    return registro.get(chave)
+
+# Função para aplicar a extração de valores ao DataFrame
+def aplicar_funcao(df):
+    """
+    Esta função recebe um DataFrame (df) que possui uma coluna chamada 'records' contendo registros no formato OrderedDict.
+    a. Inicializa uma lista chamada novas_colunas que será usada para armazenar os valores extraídos para cada chave.
+    b. Itera sobre as chaves do primeiro registro na coluna 'records'.
+    c. Para cada chave, utiliza o método apply para aplicar a função lambda, que chama extrair_valores para 
+       extrair os valores associados a essa chave de cada registro. Os valores extraídos são armazenados em listas.
+    d. Cria um DataFrame temporário (df_novas_colunas) a partir das listas de valores extraídos.
+    e. Utiliza o método pd.concat para concatenar o DataFrame temporário com o DataFrame original (df).
+    f. Remove a coluna 'records' do DataFrame resultante.
+    """
+    novas_colunas = []
+
+    # Iterar sobre as chaves do primeiro registro
+    for chave in df['records'][0].keys():
+        # Extrair valores para cada chave
+        novas_colunas.append(df['records'].apply(lambda x: extrair_valores(x, chave)).tolist())
+
+    # Criar um DataFrame temporário para as novas colunas
+    df_novas_colunas = pd.DataFrame(dict(zip(df['records'][0].keys(), novas_colunas)))
+
+    # Concatenar o DataFrame temporário com o DataFrame original
+    df = pd.concat([df, df_novas_colunas], axis=1)
+
+    # Remover as colunas padrão
+    columnsToDrop = ['done', 'totalSize', 'attributes', 'records']
+    df.drop(columns=columnsToDrop, axis=1, inplace=True)
+
+    return df
+
