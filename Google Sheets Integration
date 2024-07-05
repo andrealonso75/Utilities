@@ -1,0 +1,73 @@
+%pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client
+
+dbutils.library.restartPython()
+
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+import os
+import pyspark.pandas as pd
+
+
+# Main Function
+
+class Sender:
+
+    def __init__(self):
+        self.drive_service = None
+        self.set_drive_service()
+
+    def set_drive_service(self):
+        credentials_path = "/Volumes/silver/sisrem/sisrem/credentials.json"
+        if not os.path.exists(credentials_path):
+            raise FileNotFoundError(f"Arquivo de credenciais não encontrado: {credentials_path}")
+        credentials = service_account.Credentials.from_service_account_file(credentials_path)
+        drive_service = build('drive', 'v3', credentials=credentials)
+        self.drive_service = drive_service
+
+    def send_file(self, drive_folder_id, filepath):
+        filename = filepath.split("/")[-1]
+
+        file_metadata = {
+            "name": filename,
+            "parents": [drive_folder_id]
+        }
+
+        media = MediaFileUpload(filepath)
+
+        file = (self.drive_service
+                    .files()
+                    .create(body=file_metadata, media_body=media, fields='id')
+                    .execute())
+        
+        return file.get("id")
+        
+    def share_file(self, id_file, emails):
+        permissions = []
+        for email in emails:
+            permission = {
+                'type': 'user',
+                'role': 'owner',
+                'emailAddress': email
+            }
+            permissions.append(permission)
+
+def create_and_send_df_from_spark(spark_df, csv_path):
+    # Converte o DataFrame do PySpark para pandas
+    df = spark_df.toPandas()
+
+    # Salva o DataFrame em um arquivo CSV
+    df.to_csv(csv_path, index=False)
+    return df
+
+def upload_and_share_file(drive_folder_id, email_to_share, csv_path):
+    # Cria uma instância do Sender
+    sender = Sender()
+    
+    # Envia o arquivo e obtém o ID do arquivo enviado
+    file_id = sender.send_file(drive_folder_id, csv_path)
+    print(f"Arquivo enviado com sucesso. ID do arquivo: {file_id}")
+    
+    # Compartilha o arquivo com o e-mail especificado
+    sender.share_file(file_id, email_to_share)
+    print(f"Arquivo compartilhado com {email_to_share}")
